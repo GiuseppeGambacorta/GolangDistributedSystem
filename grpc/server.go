@@ -69,7 +69,7 @@ func (server *grpcServer) notifyConsumers() {
 }
 
 func (server *grpcServer) Produce(ctx context.Context, req *api.ProduceRequest) (*api.ProduceResponse, error) {
-	offset, err := server.CommitLog.Append(req)
+	offset, err := server.CommitLog.Append(req.Record)
 	if err != nil {
 		return nil, err
 	}

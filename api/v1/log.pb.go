@@ -75,7 +75,7 @@ func (x *Record) GetValue() []byte {
 
 type ProduceRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Value         []byte                 `protobuf:"bytes,1,opt,name=value,proto3" json:"value,omitempty"`
+	Record        *Record                `protobuf:"bytes,1,opt,name=record,proto3" json:"record,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -110,9 +110,9 @@ func (*ProduceRequest) Descriptor() ([]byte, []int) {
 	return file_api_v1_log_proto_rawDescGZIP(), []int{1}
 }
 
-func (x *ProduceRequest) GetValue() []byte {
+func (x *ProduceRequest) GetRecord() *Record {
 	if x != nil {
-		return x.Value
+		return x.Record
 	}
 	return nil
 }
@@ -256,9 +256,9 @@ const file_api_v1_log_proto_rawDesc = "" +
 	"\x10api/v1/log.proto\x12\x06log.v1\"6\n" +
 	"\x06Record\x12\x16\n" +
 	"\x06offset\x18\x01 \x01(\x04R\x06offset\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\fR\x05value\"&\n" +
-	"\x0eProduceRequest\x12\x14\n" +
-	"\x05value\x18\x01 \x01(\fR\x05value\")\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value\"8\n" +
+	"\x0eProduceRequest\x12&\n" +
+	"\x06record\x18\x01 \x01(\v2\x0e.log.v1.RecordR\x06record\")\n" +
 	"\x0fProduceResponse\x12\x16\n" +
 	"\x06offset\x18\x01 \x01(\x04R\x06offset\"(\n" +
 	"\x0eConsumeRequest\x12\x16\n" +
@@ -292,20 +292,21 @@ var file_api_v1_log_proto_goTypes = []any{
 	(*ConsumeResponse)(nil), // 4: log.v1.ConsumeResponse
 }
 var file_api_v1_log_proto_depIdxs = []int32{
-	0, // 0: log.v1.ConsumeResponse.record:type_name -> log.v1.Record
-	1, // 1: log.v1.Log.Produce:input_type -> log.v1.ProduceRequest
-	3, // 2: log.v1.Log.Consume:input_type -> log.v1.ConsumeRequest
-	3, // 3: log.v1.Log.ConsumeStream:input_type -> log.v1.ConsumeRequest
-	1, // 4: log.v1.Log.ProduceStream:input_type -> log.v1.ProduceRequest
-	2, // 5: log.v1.Log.Produce:output_type -> log.v1.ProduceResponse
-	4, // 6: log.v1.Log.Consume:output_type -> log.v1.ConsumeResponse
-	4, // 7: log.v1.Log.ConsumeStream:output_type -> log.v1.ConsumeResponse
-	2, // 8: log.v1.Log.ProduceStream:output_type -> log.v1.ProduceResponse
-	5, // [5:9] is the sub-list for method output_type
-	1, // [1:5] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	0, // 0: log.v1.ProduceRequest.record:type_name -> log.v1.Record
+	0, // 1: log.v1.ConsumeResponse.record:type_name -> log.v1.Record
+	1, // 2: log.v1.Log.Produce:input_type -> log.v1.ProduceRequest
+	3, // 3: log.v1.Log.Consume:input_type -> log.v1.ConsumeRequest
+	3, // 4: log.v1.Log.ConsumeStream:input_type -> log.v1.ConsumeRequest
+	1, // 5: log.v1.Log.ProduceStream:input_type -> log.v1.ProduceRequest
+	2, // 6: log.v1.Log.Produce:output_type -> log.v1.ProduceResponse
+	4, // 7: log.v1.Log.Consume:output_type -> log.v1.ConsumeResponse
+	4, // 8: log.v1.Log.ConsumeStream:output_type -> log.v1.ConsumeResponse
+	2, // 9: log.v1.Log.ProduceStream:output_type -> log.v1.ProduceResponse
+	6, // [6:10] is the sub-list for method output_type
+	2, // [2:6] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_api_v1_log_proto_init() }
