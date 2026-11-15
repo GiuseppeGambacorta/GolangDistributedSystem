@@ -1,11 +1,11 @@
-package server
+package main
 
 import (
 	"context"
 	"io"
 	"sync"
 
-	api "Distribuiti/api/v1"
+	api "distribuiti/api/v1"
 
 	"google.golang.org/grpc"
 )
@@ -69,7 +69,7 @@ func (server *grpcServer) notifyConsumers() {
 }
 
 func (server *grpcServer) Produce(ctx context.Context, req *api.ProduceRequest) (*api.ProduceResponse, error) {
-	offset, err := server.CommitLog.Append(req.Record)
+	offset, err := server.CommitLog.Append(req)
 	if err != nil {
 		return nil, err
 	}

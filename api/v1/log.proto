@@ -17,7 +17,7 @@ service Log {
 }
 
 message ProduceRequest {
-  bytes value = 1;
+  Record record = 1;
 }
 
 message ProduceResponse {
