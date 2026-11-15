@@ -5,7 +5,7 @@ import (
 	"os"
 	"path"
 
-	api "Distribuiti/progLog/05_ServerToServerServiceDiscovery/api/v1"
+	api "distribuiti/api/v1"
 
 	"google.golang.org/protobuf/proto"
 )
@@ -50,7 +50,7 @@ func newSegment(dir string, baseOffset uint64, config Config) (*segment, error) 
 	return segment, nil
 }
 
-func (segment *segment) Append(record *api.Record) (uint64, error) {
+func (segment *segment) Append(record *Record) (uint64, error) {
 	currentOffset := segment.nextOffset
 	record.Offset = currentOffset
 	data, err := proto.Marshal(record)
@@ -67,6 +67,23 @@ func (segment *segment) Append(record *api.Record) (uint64, error) {
 	}
 	segment.nextOffset++
 	return currentOffset, nil
+}
+
+func (segment *segment) Read(offset uint64) (*Record, error) {
+	relariveOffset := int64(offset - segment.baseOffset)
+	_, storePosition, err := segment.index.Read(relariveOffset)
+	if err != nil {
+		return nil, err
+	}
+	data, err := segment.store.Read(storePosition)
+	if err != nil {
+		return nil, err
+	}
+	record := &api.Record{}
+	if err := proto.Unmarshal(data, record); err != nil {
+		return nil, err
+	}
+	return record, nil
 }
 
 func (segment *segment) IsMaxed() bool {
