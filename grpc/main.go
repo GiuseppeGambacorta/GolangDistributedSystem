@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	api "distribuiti/api/v1"
+	commitlog "distribuiti/log"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -23,16 +25,23 @@ import (
 
 func main() {
 	address := flag.String("addr", "127.0.0.1:8080", "gRPC server address")
+	serverMode := flag.Bool("server", false, "start the gRPC server")
 	op := flag.String("op", "produce", "operation: produce | consume | produce-stream | consume-stream")
 	value := flag.String("value", "hello world", "record value for produce")
 	offset := flag.Uint64("offset", 0, "record offset for consume / consume-stream")
 	flag.Parse()
+
+	if *serverMode {
+		runServer(*address)
+		return
+	}
 
 	// Connessione al server gRPC senza TLS (moderna, al posto di grpc.Dial deprecato)
 	conn, err := grpc.NewClient(*address, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Fatalf("impossibile creare il client gRPC: %v", err)
 	}
+
 	defer conn.Close()
 
 	client := api.NewLogClient(conn)
@@ -156,5 +165,34 @@ func runConsumeStream(ctx context.Context, client api.LogClient, startOffset uin
 			log.Fatalf("errore lettura ConsumeStream: %v", err)
 		}
 		fmt.Printf("[Record] offset=%d | value=%q\n", res.Record.Offset, string(res.Record.Value))
+	}
+}
+
+func runServer(address string) {
+	dataDir := "data"
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		log.Fatalf("impossibile creare la directory dati: %v", err)
+	}
+
+	commitLog, err := commitlog.NewLog(dataDir, commitlog.Config{})
+	if err != nil {
+		log.Fatalf("impossibile aprire il commit log: %v", err)
+	}
+	defer commitLog.Close()
+
+	grpcServer, err := NewGRPCServer(&Config{CommitLog: commitLog})
+	if err != nil {
+		log.Fatalf("impossibile creare il server gRPC: %v", err)
+	}
+
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		log.Fatalf("impossibile ascoltare su %s: %v", address, err)
+	}
+	defer listener.Close()
+
+	log.Printf("server gRPC in ascolto su %s", address)
+	if err := grpcServer.Serve(listener); err != nil {
+		log.Fatalf("errore server gRPC: %v", err)
 	}
 }
