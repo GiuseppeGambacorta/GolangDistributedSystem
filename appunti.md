@@ -114,3 +114,10 @@ In questo caso:
 1. `var lengthBytes [8]byte` riserva 8 byte direttamente nello **stack frame** della funzione.
 2. `lengthBytes[:]` crea una vista `[]byte` su quei 8 byte a costo zero.
 3. Quando la funzione termina, lo stack frame viene semplicemente rilasciato senza alcun intervento del Garbage Collector (**0 allocazioni heap**).
+
+
+----
+
+## Forzare compilatore a controllare se una struttura implementa completamente una interfaccia
+
+var _ api.LogServer = (*grpcServer)(nil)
