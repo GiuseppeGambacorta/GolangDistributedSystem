@@ -28,6 +28,7 @@ func newSegment(dir string, baseOffset uint64, config Config) (*segment, error) 
 		return nil, err
 	}
 	if segment.store, err = newStore(storeFile); err != nil {
+		_ = storeFile.Close()
 		return nil, err
 	}
 	indexFile, err := os.OpenFile(
@@ -36,9 +37,12 @@ func newSegment(dir string, baseOffset uint64, config Config) (*segment, error) 
 		0644,
 	)
 	if err != nil {
+		_ = segment.store.Close()
 		return nil, err
 	}
 	if segment.index, err = newIndex(indexFile, config); err != nil {
+		_ = segment.store.Close()
+		_ = indexFile.Close()
 		return nil, err
 	}
 	// with -1 a i am reading the latest offset
