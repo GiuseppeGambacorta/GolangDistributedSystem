@@ -2,9 +2,10 @@ package log
 
 import (
 	"io"
+	"maps"
 	"os"
-	"path"
-	"sort"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,30 +44,31 @@ func NewLog(dir string, config Config) (*Log, error) {
 	return log, nil
 }
 
+// setup ricostruisce in memoria i segmenti già presenti su disco (in ordine crescente di baseOffset)
+// deduplicando le coppie .store/.index; se la directory è vuota crea il primo segmento da InitialOffset.
 func (log *Log) setup() error {
 	files, err := os.ReadDir(log.Dir)
 	if err != nil {
 		return err
 	}
+
 	baseOffsetSet := make(map[uint64]struct{})
 	for _, file := range files {
-		baseOffsetText := strings.TrimSuffix(file.Name(), path.Ext(file.Name()))
+		baseOffsetText := strings.TrimSuffix(file.Name(), filepath.Ext(file.Name()))
 		baseOffset, err := strconv.ParseUint(baseOffsetText, 10, 64)
 		if err != nil {
 			continue
 		}
 		baseOffsetSet[baseOffset] = struct{}{}
 	}
-	baseOffsets := make([]uint64, 0, len(baseOffsetSet))
-	for baseOffset := range baseOffsetSet {
-		baseOffsets = append(baseOffsets, baseOffset)
-	}
-	sort.Slice(baseOffsets, func(i, j int) bool { return baseOffsets[i] < baseOffsets[j] })
+
+	baseOffsets := slices.Sorted(maps.Keys(baseOffsetSet))
 	for _, baseOffset := range baseOffsets {
 		if err := log.addSegment(baseOffset); err != nil {
 			return err
 		}
 	}
+
 	if len(log.segments) == 0 {
 		if err := log.addSegment(log.Config.Segment.InitialOffset); err != nil {
 			return err

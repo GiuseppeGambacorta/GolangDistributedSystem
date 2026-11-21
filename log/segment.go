@@ -3,7 +3,7 @@ package log
 import (
 	"fmt"
 	"os"
-	"path"
+	"path/filepath"
 
 	api "distribuiti/api/v1"
 
@@ -20,7 +20,7 @@ type segment struct {
 func newSegment(dir string, baseOffset uint64, config Config) (*segment, error) {
 	segment := &segment{baseOffset: baseOffset, config: config}
 	storeFile, err := os.OpenFile(
-		path.Join(dir, fmt.Sprintf("%d.store", baseOffset)),
+		filepath.Join(dir, fmt.Sprintf("%d.store", baseOffset)),
 		os.O_RDWR|os.O_CREATE|os.O_APPEND,
 		0644,
 	)
@@ -31,7 +31,7 @@ func newSegment(dir string, baseOffset uint64, config Config) (*segment, error) 
 		return nil, err
 	}
 	indexFile, err := os.OpenFile(
-		path.Join(dir, fmt.Sprintf("%d.index", baseOffset)),
+		filepath.Join(dir, fmt.Sprintf("%d.index", baseOffset)),
 		os.O_RDWR|os.O_CREATE,
 		0644,
 	)
@@ -70,8 +70,8 @@ func (segment *segment) Append(record *Record) (uint64, error) {
 }
 
 func (segment *segment) Read(offset uint64) (*Record, error) {
-	relariveOffset := int64(offset - segment.baseOffset)
-	_, storePosition, err := segment.index.Read(relariveOffset)
+	relativeOffset := int64(offset - segment.baseOffset)
+	_, storePosition, err := segment.index.Read(relativeOffset)
 	if err != nil {
 		return nil, err
 	}

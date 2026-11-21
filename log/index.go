@@ -18,7 +18,7 @@ type index struct {
 }
 
 func newIndex(indexFile *os.File, config Config) (*index, error) {
-	fileInfo, err := os.Stat(indexFile.Name())
+	fileInfo, err := indexFile.Stat()
 	if err != nil {
 		return nil, err
 	}

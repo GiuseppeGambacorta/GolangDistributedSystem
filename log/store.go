@@ -19,7 +19,7 @@ type store struct {
 }
 
 func newStore(file *os.File) (*store, error) {
-	fileInfo, err := os.Stat(file.Name())
+	fileInfo, err := file.Stat()
 	if err != nil {
 		return nil, err
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"sync"
 
@@ -86,10 +87,10 @@ func (server *grpcServer) Consume(ctx context.Context, req *api.ConsumeRequest) 
 	return &api.ConsumeResponse{Record: record}, nil
 }
 
-func (server *grpcServer) ProduceStream(stream api.Log_ProduceStreamServer) error {
+func (server *grpcServer) ProduceStream(stream grpc.BidiStreamingServer[api.ProduceRequest, api.ProduceResponse]) error {
 	for {
 		req, err := stream.Recv()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return nil
 		}
 		if err != nil {
@@ -106,27 +107,26 @@ func (server *grpcServer) ProduceStream(stream api.Log_ProduceStreamServer) erro
 	}
 }
 
-func (server *grpcServer) ConsumeStream(req *api.ConsumeRequest, stream api.Log_ConsumeStreamServer) error {
+func (server *grpcServer) ConsumeStream(req *api.ConsumeRequest, stream grpc.ServerStreamingServer[api.ConsumeResponse]) error {
 	for {
 		// Prendiamo il canale PRIMA di tentare la lettura: evita una race condition
 		// se un Produce avviene esattamente tra Read() e l'ingresso nel select.
 		waitCh := server.waitChannel()
 
 		response, err := server.Consume(stream.Context(), req)
-		switch err.(type) {
-		case nil:
 
-		case api.ErrOffsetOutOfRange:
-			// Siamo in pari col log: finché waitCh è aperto e vuoto, la lettura
-			// <-waitCh blocca la goroutine a 0% CPU. Appena un Produce chiama
-			// close(notifyCh), <-waitCh si sblocca immediatamente e riprende il ciclo.
-			select {
-			case <-waitCh:
-				continue
-			case <-stream.Context().Done():
-				return nil
+		if err != nil {
+			if _, ok := errors.AsType[api.ErrOffsetOutOfRange](err); ok {
+				// Siamo in pari col log: finché waitCh è aperto e vuoto, la lettura
+				// <-waitCh blocca la goroutine a 0% CPU. Appena un Produce chiama
+				// close(notifyCh), <-waitCh si sblocca immediatamente e riprende il ciclo.
+				select {
+				case <-waitCh:
+					continue
+				case <-stream.Context().Done():
+					return nil
+				}
 			}
-		default:
 			return err
 		}
 
