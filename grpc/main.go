@@ -1,3 +1,26 @@
+/*
+Esempi di lancio (dalla root del progetto; se eseguito dentro grpc/, usa `go run .` invece di `go run ./grpc`,
+non usare `go run main.go` perché `server.go` fa parte dello stesso package `main`):
+
+ 1. Avvio Server:
+    go run ./grpc -server
+    go run ./grpc -server -addr 127.0.0.1:8080
+
+2) Avvio Client (in un altro terminale; flag -addr opzionale, default 127.0.0.1:8080):
+
+  - Produce singolo (Unary):
+    go run ./grpc -op produce -value "hello world"
+    go run ./grpc -addr 127.0.0.1:8080 -op produce -value "ciao"
+
+  - Consume singolo (Unary):
+    go run ./grpc -op consume -offset 0
+
+  - ProduceStream (Bidirectional Streaming interattivo da tastiera):
+    go run ./grpc -op produce-stream
+
+  - ConsumeStream (Server-Side Streaming in tempo reale dall'offset indicato):
+    go run ./grpc -op consume-stream -offset 0
+*/
 package main
 
 import (

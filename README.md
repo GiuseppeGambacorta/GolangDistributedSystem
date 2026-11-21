@@ -11,9 +11,8 @@ Panoramica del progetto (Commit Log distribuito in Go con Protocol Buffers e gRP
 | 1 | [`log/store e index.md`](log/store%20e%20index.md) | Step 1 — `log/` | Schema visivo del formato su disco: file `.index` (entry fisse da 12 B) che punta ai record nel file `.store` (8 B lunghezza + dati). |
 | 2 | [`log/segment.md`](log/segment.md) | Step 1 — `log/` | Schema visivo del funzionamento di un `segment`: traduzione da offset globale a offset relativo (`baseOffset`), lookup nell'indice e deserializzazione Protobuf. |
 | 3 | [`api/v1/proto.md`](api/v1/proto.md) | Step 2 — `api/v1/` | Guida completa a `log.proto`, RPC Unary e Streaming, gestione errori gRPC (`error.go`), dipendenze e comandi `protoc`. |
-| 4 | [`appuntiGolang.md`](appuntiGolang.md) | Appunti trasversali | Approfondimenti Go usati nel progetto: Array vs Slice, operatore `[:]` (Zero-Allocation pattern) e controllo interfacce a compile-time. |
-
-> **Nota:** nella cartella `grpc/` al momento non sono ancora presenti file `.md` dedicati.
+| 4 | [`grpc/README.md`](grpc/README.md) | Step 3 — `grpc/` | Flusso completo di avvio server/client, funzionamento delle 4 RPC (Unary e Streaming), meccanismo `notifyCh` a 0% CPU e test multi-terminale. |
+| 5 | [`appuntiGolang.md`](appuntiGolang.md) | Appunti trasversali | Approfondimenti Go usati nel progetto: Array vs Slice, operatore `[:]` (Zero-Allocation pattern) e controllo interfacce a compile-time. |
 
 ---
 
@@ -66,6 +65,8 @@ Esposizione del Commit Log via rete gRPC:
 - **`grpc/main.go`**: entrypoint eseguibile sia in modalità server (`-server`) sia come client CLI per testare `produce`, `consume`, `produce-stream` e `consume-stream`.
 
 *(Prossimo step pianificato: aggiunta della sicurezza mTLS e autorizzazione ACL.)*
+
+- **Documentazione interna:** [`grpc/README.md`](grpc/README.md).
 
 ---
 
