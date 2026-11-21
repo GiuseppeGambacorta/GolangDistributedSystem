@@ -1,6 +1,6 @@
 module distribuiti
 
-go 1.26.2
+go 1.27
 
 require (
 	github.com/casbin/casbin/v2 v2.135.0

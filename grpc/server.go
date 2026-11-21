@@ -107,7 +107,9 @@ func RunServer(ctx context.Context, address string) error {
 	if err != nil {
 		return fmt.Errorf("impossibile configurare mTLS lato server: %w", err)
 	}
-	serverCreds := credentials.NewTLS(serverTLSConfig)
+
+	// serverCreds := credentials.NewTLS(serverTLSConfig)
+	serverCreds := newLoggingCreds(credentials.NewTLS(serverTLSConfig), telemetry.Logger)
 
 	authorizer, err := security.NewAuthorizer(security.ACLModelPath, security.ACLPolicyPath)
 	if err != nil {
@@ -412,4 +414,46 @@ func peerAddress(ctx context.Context) string {
 		return peerInfo.Addr.String()
 	}
 	return ""
+}
+
+// loggingCreds usa lo "struct embedding" di Go (una sorta di override / Decorator Pattern):
+// incorporando credentials.TransportCredentials senza nome di campo, eredita automaticamente
+// tutti i suoi metodi e fa l'override solo di ServerHandshake (chiamando l'originale come un
+// "super" e loggando eventuali errori TLS/mTLS su server.log) e di Clone.
+type loggingCreds struct {
+	credentials.TransportCredentials
+	logger *slog.Logger
+}
+
+func newLoggingCreds(base credentials.TransportCredentials, logger *slog.Logger) credentials.TransportCredentials {
+	if logger == nil {
+		return base
+	}
+	return &loggingCreds{
+		TransportCredentials: base,
+		logger:               logger,
+	}
+}
+
+func (c *loggingCreds) ServerHandshake(rawConn net.Conn) (net.Conn, credentials.AuthInfo, error) {
+	conn, authInfo, err := c.TransportCredentials.ServerHandshake(rawConn)
+	if err != nil {
+		peerAddr := ""
+		if rawConn != nil && rawConn.RemoteAddr() != nil {
+			peerAddr = rawConn.RemoteAddr().String()
+		}
+		c.logger.Warn("tls handshake failed",
+			"peer.address", peerAddr,
+			"error", err.Error(),
+		)
+		return nil, nil, err
+	}
+	return conn, authInfo, nil
+}
+
+func (c *loggingCreds) Clone() credentials.TransportCredentials {
+	return &loggingCreds{
+		TransportCredentials: c.TransportCredentials.Clone(),
+		logger:               c.logger,
+	}
 }
