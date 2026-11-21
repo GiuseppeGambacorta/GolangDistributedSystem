@@ -63,12 +63,13 @@ Definizione del modello dati e delle RPC esposte sulla rete:
 
 ---
 
-### Step 3 — Server e Client gRPC (`grpc/`)
+### Step 3 — Server, Client gRPC e CLI Interattiva (`grpc/`, `cli/`, `main.go`)
 
-Esposizione del Commit Log via rete gRPC:
+Esposizione del Commit Log via rete gRPC e interfaccia interattiva nel terminale:
 
-- **`grpc/server.go`**: implementa `api.LogServer` collegandolo all'interfaccia `CommitLog`. Include un meccanismo di notifica broadcast (`notifyCh`) per svegliare i client in ascolto su `ConsumeStream` senza polling attivo.
-- **`grpc/main.go`**: entrypoint eseguibile sia in modalità server (`-server`) sia come client CLI per testare `produce`, `consume`, `produce-stream` e `consume-stream`.
+- **`grpc/server.go`** (`package grpcserver`): implementa `api.LogServer` collegandolo a `CommitLog` e `Authorizer`, con interceptor mTLS nativi, `RunServer()` e notifica broadcast (`notifyCh`) per svegliare i `ConsumeStream` senza polling attivo.
+- **`grpc/client.go`** (`package grpcserver`): connessione gRPC configurabile per profilo (`root`, `reader`, `no-client-cert`, `insecure`) e funzioni `Produce`, `Consume`, `ProduceStream`, `ConsumeStream`.
+- **`cli/cli.go`** + **`main.go`**: menu interattivo a frecce (con `charmbracelet/huh`) lanciabile dalla root con un solo comando `go run .` senza flag.
 
 - **Documentazione interna:** [`grpc/grpc.md`](grpc/grpc.md), [`grpc/grpc client server.md`](grpc/grpc%20client%20server.md).
 
@@ -109,20 +110,8 @@ make compile
 # Esegue i test con race detector
 make test
 
-# Avvia il server gRPC con mTLS attivo (prerequisito: make gencert)
-go run ./grpc -server -addr 127.0.0.1:8080
-
-# Esempi client CLI con mTLS (in un altro terminale)
-go run ./grpc -op produce -value "ciao"
-go run ./grpc -op consume -offset 0
-go run ./grpc -op consume-stream -offset 0
-go run ./grpc -op produce-stream
-
-# Verifica permessi ACL (reader legge ma NON scrive) e rifiuti mTLS
-go run ./grpc -user reader -op consume -offset 0
-go run ./grpc -user reader -op produce -value "non autorizzato"
-go run ./grpc -no-client-cert -op produce -value "senza passaporto"
-go run ./grpc -insecure -op produce -value "in chiaro"
+# Avvia la CLI interattiva (Server mTLS+ACL e Client con menu a frecce, zero flag!)
+go run .
 ```
 
 ---
@@ -139,6 +128,7 @@ Elenco aggiornato delle dipendenze presenti in [`go.mod`](go.mod), dei principal
 | `google.golang.org/grpc` | `v1.85.0` | `grpc/`, `api/v1/log_grpc.pb.go`, `api/v1/error.go`, `security/authorizer.go` | Server e client gRPC (Unary e Streaming), interceptor nativi (`ChainUnaryInterceptor` / `ChainStreamInterceptor`), lettura identità mTLS (`peer`, `credentials.TLSInfo`), trasporto TLS/mTLS (`credentials.NewTLS`) e status/codici errore (`codes`, `status`). |
 | `google.golang.org/genproto/googleapis/rpc` | `v0.0.0-20261110000943-09e21b237f2c` | `api/v1/error.go` | Tipi standard per arricchire gli errori gRPC con metadati strutturati (`errdetails.LocalizedMessage`). |
 | `github.com/casbin/casbin/v2` | `v2.135.0` | `security/authorizer.go` | Motore di autorizzazione ACL (controllo accessi): valuta se un `subject` (`root`, `reader`) può eseguire un'azione (`produce`, `consume`) secondo `05-acl-modello.conf` e `06-acl-permessi.csv`. |
+| `github.com/charmbracelet/huh` | `v1.0.0` | `cli/cli.go` | Menu interattivi e form nel terminale (costruita sopra `bubbletea`) per lanciare server e client da `go run .` senza flag. |
 
 > **Dipendenze indirette (`// indirect` in `go.mod`):** `golang.org/x/net`, `golang.org/x/sys`, `golang.org/x/text` (usate internamente da `google.golang.org/grpc` per HTTP/2, syscall e testo) e `github.com/casbin/govaluate`, `github.com/bmatcuk/doublestar/v4`, `github.com/google/uuid` (usate internamente da `casbin/v2` per valutare i matcher e i pattern wildcard).
 

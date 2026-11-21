@@ -1,6 +1,6 @@
 # Modulo `grpc/` — Flusso Server e Client
 
-Documentazione del layer gRPC del progetto, basata su [`server.go`](server.go) e [`main.go`](main.go) (entrambi nello stesso `package main`).
+Documentazione del layer gRPC del progetto, basata su [`server.go`](server.go) e [`client.go`](client.go) (`package grpcserver`), controllati dal menu interattivo in [`../cli/cli.go`](../cli/cli.go) (avviato da [`../main.go`](../main.go)).
 
 ---
 
@@ -8,8 +8,9 @@ Documentazione del layer gRPC del progetto, basata su [`server.go`](server.go) e
 
 | File | Ruolo |
 | :--- | :--- |
-| [`server.go`](server.go) | Implementazione del servizio gRPC `api.LogServer` (`grpcServer`), disaccoppiata dal motore di storage tramite l'interfaccia `CommitLog`, con broadcast `notifyCh` per lo streaming in tempo reale. |
-| [`main.go`](main.go) | Entrypoint unico eseguibile sia in modalità **server** (`-server`) sia come **client CLI** per le 4 RPC (`produce`, `consume`, `produce-stream`, `consume-stream`). |
+| [`server.go`](server.go) | Implementazione del servizio gRPC `api.LogServer` (`grpcServer`), disaccoppiata tramite le interfacce `CommitLog` e `Authorizer`, con interceptor mTLS nativi, `RunServer()` e broadcast `notifyCh`. |
+| [`client.go`](client.go) | Creazione della connessione gRPC (`NewClient` con profili `root`, `reader`, `no-client-cert`, `insecure`) e le 4 operazioni `Produce`, `Consume`, `ProduceStream`, `ConsumeStream`. |
+| [`../cli/cli.go`](../cli/cli.go) + [`../main.go`](../main.go) | CLI interattiva a frecce (`charmbracelet/huh`): lanci `go run .` dalla root senza nessun flag e gestisci sia il server sia il client. |
 
 ---
 
@@ -140,63 +141,23 @@ Consente a uno o più consumer di restare in ascolto in tempo reale sui nuovi re
 
 ---
 
-## 3. Flag CLI e Test Multi-Terminale
+## 3. Avvio tramite CLI Interattiva (`go run .`)
 
-### Flag disponibili (`main.go`)
+Non servono più flag da riga di comando: dalla root del repository esegui semplicemente:
 
-| Flag | Default | Descrizione |
-| :--- | :--- | :--- |
-| `-server` | `false` | Avvia il processo in modalità server gRPC invece che client. |
-| `-addr` | `127.0.0.1:8080` | Indirizzo TCP su cui il server ascolta o a cui il client si connette. |
-| `-op` | `produce` | Operazione client: `produce`, `consume`, `produce-stream`, `consume-stream`. |
-| `-value` | `hello world` | Valore testuale del record per `-op produce`. |
-| `-offset` | `0` | Offset di partenza per `-op consume` o `-op consume-stream`. |
-| `-user` | `root` | Identità client (certificato mTLS): `root` (legge+scrive) o `reader` (solo lettura). |
-| `-insecure` | `false` | Disattiva TLS sul client per verificare che il server rifiuti connessioni in chiaro. |
-| `-no-client-cert` | `false` | Usa TLS a 1 via senza passaporto client per verificare che il server mTLS rifiuti client anonimi. |
-
-> **Nota sul comando `go run`:** esegui sempre `go run ./grpc ...` dalla root del repository (oppure `go run . ...` da dentro `grpc/`). Non usare `go run main.go`, perché `server.go` appartiene allo stesso `package main`.
-
-### Esempio pratico su 3 terminali
-
-**Prerequisito (una sola volta, genera i certificati in `security/certs/`):**
 ```bash
+# Prerequisito (una sola volta, genera i certificati in security/certs/):
 make gencert
+
+# Avvia la CLI interattiva (apri 2 o 3 terminali: uno per il server, gli altri per i client)
+go run .
 ```
 
-**Terminale 1 — Avvia il server (con TLS attivo):**
-```bash
-go run ./grpc -server
-```
-
-**Terminale 2 — Apri un consumer in streaming dall'offset 0 (con TLS attivo):**
-```bash
-go run ./grpc -op consume-stream -offset 0
-```
-
-**Terminale 3 — Invia record (singoli o in streaming) e osservali apparire in tempo reale nel Terminale 2:**
-```bash
-# Invio singolo
-go run ./grpc -op produce -value "primo messaggio"
-
-# Lettura singola
-go run ./grpc -op consume -offset 0
-
-# Oppure invio interattivo continuo ('exit' o Ctrl+D per terminare)
-go run ./grpc -op produce-stream
-```
-
-**Prova del 9 — Verifica ACL (`reader` vs `root`) e rifiuti mTLS:**
-```bash
-# 1. reader può leggere (OK):
-go run ./grpc -user reader -op consume -offset 0
-
-# 2. reader NON può scrivere -> PermissionDenied:
-go run ./grpc -user reader -op produce -value "non autorizzato"
-
-# 3. Client senza certificato proprio (TLS 1-way) -> rifiutato dal server mTLS:
-go run ./grpc -no-client-cert -op produce -value "senza passaporto"
-
-# 4. Client senza TLS -> rifiutato dal server mTLS:
-go run ./grpc -insecure -op produce -value "in chiaro"
-```
+Dal menu a frecce puoi scegliere:
+1. **Avvia Server gRPC (mTLS + ACL)** (default `127.0.0.1:8080`, `Ctrl+C` arresta in modo pulito).
+2. **Avvia Client interattivo** → scegli il profilo di sicurezza:
+   - `root` *(mTLS — legge e scrive)*
+   - `reader` *(mTLS — sola lettura; su `Produce` riceve `PermissionDenied` senza uscire dal menu)*
+   - `no-client-cert` *(TLS 1-way — test rifiuto mTLS)*
+   - `insecure` *(senza TLS — test rifiuto in chiaro)*
+3. Poi esegui `Produce`, `Consume`, `ProduceStream`, `ConsumeStream` o cambi utente al volo restando sempre nel menu!

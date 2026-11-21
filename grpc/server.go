@@ -1,12 +1,18 @@
-package main
+package grpcserver
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"log"
+	"net"
+	"os"
 	"sync"
 
 	api "distribuiti/api/v1"
+	commitlog "distribuiti/log"
+	"distribuiti/security"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -48,6 +54,68 @@ func NewGRPCServer(config *Config, opts ...grpc.ServerOption) (*grpc.Server, err
 	}
 	api.RegisterLogServer(grpcServer, server)
 	return grpcServer, nil
+}
+
+// RunServer avvia il server gRPC completo (CommitLog su data/ + mTLS + Casbin ACL)
+// e si arresta in modo pulito quando ctx viene cancellato (es. Ctrl+C).
+func RunServer(ctx context.Context, address string) error {
+	dataDir := "data"
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return fmt.Errorf("impossibile creare la directory dati: %w", err)
+	}
+
+	commitLog, err := commitlog.NewLog(dataDir, commitlog.Config{})
+	if err != nil {
+		return fmt.Errorf("impossibile aprire il commit log: %w", err)
+	}
+	defer commitLog.Close()
+
+	// Il server carica il proprio passaporto + chiave privata E il timbro della CA con IsServer: true:
+	// attiva tls.RequireAndVerifyClientCert (mTLS a 2 vie) per verificare anche i client.
+	serverTLSConfig, err := security.BuildTLSConfig(security.TLSOptions{
+		PublicCertPath:   security.ServerPublicCertPath,
+		PrivateKeyPath:   security.ServerPrivateKeyPath,
+		CAPublicCertPath: security.CAPublicCertPath,
+		IsServer:         true,
+	})
+	if err != nil {
+		return fmt.Errorf("impossibile configurare mTLS lato server: %w", err)
+	}
+	serverCreds := credentials.NewTLS(serverTLSConfig)
+
+	authorizer, err := security.NewAuthorizer(security.ACLModelPath, security.ACLPolicyPath)
+	if err != nil {
+		return fmt.Errorf("impossibile inizializzare l'authorizer ACL: %w", err)
+	}
+
+	grpcServer, err := NewGRPCServer(
+		&Config{
+			CommitLog:  commitLog,
+			Authorizer: authorizer,
+		},
+		grpc.Creds(serverCreds),
+	)
+	if err != nil {
+		return fmt.Errorf("impossibile creare il server gRPC: %w", err)
+	}
+
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return fmt.Errorf("impossibile ascoltare su %s: %w", address, err)
+	}
+	defer listener.Close()
+
+	go func() {
+		<-ctx.Done()
+		log.Println("arresto server gRPC in corso...")
+		grpcServer.GracefulStop()
+	}()
+
+	log.Printf("server gRPC (mTLS + ACL) in ascolto su %s (premi Ctrl+C per fermare)", address)
+	if err := grpcServer.Serve(listener); err != nil {
+		return fmt.Errorf("errore server gRPC: %w", err)
+	}
+	return nil
 }
 
 var _ api.LogServer = (*grpcServer)(nil)
