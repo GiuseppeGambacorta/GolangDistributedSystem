@@ -26,16 +26,18 @@ runServer(address)
   ├──► commitlog.NewLog("data", Config{})                # Apre i segmenti su disco (defer Close)
   ├──► security.BuildTLSConfig(ServerPublic/PrivateKey + CA, IsServer: true) # mTLS
   │      └──► credentials.NewTLS(...)                    # Adattatore credenziali gRPC
-  ├──► NewGRPCServer(&Config{...}, grpc.Creds(...))      # Crea grpc.Server mTLS + grpcServer con notifyCh
+  ├──► security.NewAuthorizer(ACLModelPath, ACLPolicyPath) # Carica Casbin ACL (root/reader)
+  ├──► NewGRPCServer(&Config{CommitLog, Authorizer}, grpc.Creds(...))
+  │      ├──► ChainUnaryInterceptor / ChainStreamInterceptor (estrae CN dal certificato mTLS)
   │      └──► api.RegisterLogServer(...)                 # Registra l'implementazione su gRPC
   ├──► net.Listen("tcp", address)                        # Apre il socket TCP (default 127.0.0.1:8080)
   └──► grpcServer.Serve(listener)                        # Loop di accettazione richieste gRPC
 ```
 
 Dettagli chiave in [`server.go`](server.go):
-- **Disaccoppiamento**: `grpcServer` non dipende direttamente da `*log.Log`, ma dall'interfaccia `CommitLog` (`Append` e `Read`).
+- **Disaccoppiamento**: `grpcServer` dipende dalle interfacce `CommitLog` (`Append` / `Read`) e `Authorizer` (`Authorize`).
 - **Verifica a compile-time**: `var _ api.LogServer = (*grpcServer)(nil)` garantisce che `grpcServer` implementi tutti i metodi generati da [`api/v1/log.proto`](../api/v1/log.proto).
-- **Sicurezza attuale**: è attivo **mTLS a 2 vie (autenticazione reciproca client ↔ server + cifratura)** tramite [`../security/security.md`](../security/security.md) (`IsServer: true` → `RequireAndVerifyClientCert`). L'autorizzazione ACL (Casbin) verrà aggiunta nel prossimo step.
+- **Sicurezza completa (mTLS + ACL)**: è attivo **mTLS a 2 vie** + **autorizzazione ACL con Casbin** tramite interceptor nativi gRPC (`unaryAuthInterceptor` / `streamAuthInterceptor`). Vedi [`../security/security grafico 02.md`](../security/security%20grafico%2002.md).
 
 ### Avvio del Client (`-server=false`, default)
 
@@ -44,7 +46,7 @@ main() [-server=false]
   │
   ├──► -insecure (test):         insecure.NewCredentials()
   │    -no-client-cert (test):   security.BuildTLSConfig(CAPublicCertPath)  [TLS 1-way senza cert client]
-  │    default (mTLS):           security.BuildTLSConfig(ClientPublic/PrivateKey + CAPublicCertPath)
+  │    default (mTLS):           security.BuildTLSConfig(Root/Reader cert + key + CAPublicCertPath, in base a -user)
   ├──► grpc.NewClient(address, grpc.WithTransportCredentials(clientCreds))
   ├──► api.NewLogClient(conn)                     # Stub client generato da protoc-gen-go-grpc
   ├──► signal.NotifyContext(..., SIGINT, SIGTERM) # Contesto cancellabile con Ctrl+C
@@ -149,6 +151,7 @@ Consente a uno o più consumer di restare in ascolto in tempo reale sui nuovi re
 | `-op` | `produce` | Operazione client: `produce`, `consume`, `produce-stream`, `consume-stream`. |
 | `-value` | `hello world` | Valore testuale del record per `-op produce`. |
 | `-offset` | `0` | Offset di partenza per `-op consume` o `-op consume-stream`. |
+| `-user` | `root` | Identità client (certificato mTLS): `root` (legge+scrive) o `reader` (solo lettura). |
 | `-insecure` | `false` | Disattiva TLS sul client per verificare che il server rifiuti connessioni in chiaro. |
 | `-no-client-cert` | `false` | Usa TLS a 1 via senza passaporto client per verificare che il server mTLS rifiuti client anonimi. |
 
@@ -183,11 +186,17 @@ go run ./grpc -op consume -offset 0
 go run ./grpc -op produce-stream
 ```
 
-**Prova del 9 — Verifica che il server mTLS rifiuti sia il chiaro sia client senza certificato:**
+**Prova del 9 — Verifica ACL (`reader` vs `root`) e rifiuti mTLS:**
 ```bash
-# 1. Client senza certificato proprio (TLS 1-way) -> rifiutato dal server mTLS
+# 1. reader può leggere (OK):
+go run ./grpc -user reader -op consume -offset 0
+
+# 2. reader NON può scrivere -> PermissionDenied:
+go run ./grpc -user reader -op produce -value "non autorizzato"
+
+# 3. Client senza certificato proprio (TLS 1-way) -> rifiutato dal server mTLS:
 go run ./grpc -no-client-cert -op produce -value "senza passaporto"
 
-# 2. Client senza TLS -> rifiutato dal server mTLS
+# 4. Client senza TLS -> rifiutato dal server mTLS:
 go run ./grpc -insecure -op produce -value "in chiaro"
 ```

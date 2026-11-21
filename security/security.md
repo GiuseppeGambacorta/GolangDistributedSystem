@@ -3,8 +3,8 @@
 Documentazione del layer di sicurezza del progetto, costruito seguendo il percorso progressivo di *Distributed Services with Go*:
 
 1. **TLS a 1 via — Autenticazione del Server & Cifratura** *(completato)*: il traffico è cifrato e il client verifica l'identità del server controllando che il certificato sia firmato dalla nostra CA.
-2. **mTLS (Mutual TLS) — Autenticazione del Client** *(step attuale)*: anche il client presenta un certificato firmato dalla CA (`client-public-cert.pem`), permettendo al server di verificarne l'autenticità e leggerne l'identità (`CN = "client"`).
-3. **ACL (Access Control List) con Casbin — Autorizzazione** *(prossimo step)*: il server verifica quali operazioni (`produce`, `consume`) può eseguire ogni identità autenticata (`CN`).
+2. **mTLS (Mutual TLS) — Autenticazione del Client** *(completato)*: anche il client presenta un certificato firmato dalla CA (`root-client` o `reader-client`), permettendo al server di verificarne l'autenticità e leggerne l'identità (`CN`).
+3. **ACL (Access Control List) con Casbin — Autorizzazione** *(completato)*: tramite interceptor nativi gRPC + [`authorizer.go`](authorizer.go), il server estrae il `CN` dal certificato mTLS e verifica quali operazioni (`produce`, `consume`) può eseguire ogni identità (`root` legge e scrive, `reader` legge soltanto).
 
 ---
 
@@ -36,22 +36,29 @@ security/
 │   ├── 01-ca-identita.json        # Identità della nostra CA (GolangDistributedSystem, Ravenna)
 │   ├── 02-ca-regole-firma.json    # Regole e profili di firma (server, client)
 │   ├── 03-server-richiesta.json   # Richiesta passaporto del server (localhost, 127.0.0.1, Ravenna)
-│   └── 04-client-richiesta.json   # Richiesta passaporto del client (CN="client", Ravenna)
-├── certs/                         # I 6 file finali generati (.pem) — ignorata da Git!
+│   ├── 04-client-richiesta.json   # Template generico per i client (CN sovrascritto con -cn=... nel Makefile)
+│   ├── 05-acl-modello.conf        # Modello ACL Casbin (sub, obj, act + policy_effect + matchers)
+│   └── 06-acl-permessi.csv        # Tabella permessi: root (produce+consume), reader (solo consume)
+├── certs/                         # Gli 8 file finali generati (.pem) — ignorata da Git!
 │   ├── ca-public-cert.pem         # Fac-simile pubblico del timbro della CA
 │   ├── ca-private-key.pem         # Timbro segreto della CA
 │   ├── server-public-cert.pem     # Passaporto pubblico del server
 │   ├── server-private-key.pem     # Chiave segreta del server
-│   ├── client-public-cert.pem     # Passaporto pubblico del client (CN="client")
-│   └── client-private-key.pem     # Chiave segreta del client
-├── cert_paths.go                  # Percorsi Go (CA, Server e Client)
+│   ├── root-client-public-cert.pem   # Passaporto client "root" (CN="root": lettura + scrittura)
+│   ├── root-client-private-key.pem   # Chiave segreta client "root"
+│   ├── reader-client-public-cert.pem # Passaporto client "reader" (CN="reader": sola lettura)
+│   └── reader-client-private-key.pem # Chiave segreta client "reader"
+├── cert_paths.go                  # Percorsi Go (CA, Server, RootClient, ReaderClient, ACL)
 ├── tls.go                         # Struct TLSOptions e factory BuildTLSConfig()
+├── authorizer.go                  # Wrapper Casbin v2 (NewAuthorizer, Authorize)
 ├── security.md                    # Questa guida
 ├── security grafico 00.md         # Schema visivo 00: TLS 1-way (client verifica server)
-└── security grafico 01.md         # Schema visivo 01: mTLS 2-way (anche server verifica client)
+├── security grafico 01.md         # Schema visivo 01: mTLS 2-way (anche server verifica client)
+├── security grafico 02.md         # Schema visivo 02: mTLS + Interceptor + Casbin ACL (root vs reader)
+└── security grafico 03.md         # Schema visivo 03: giro interno in grpc/server.go (interceptor -> context -> subject)
 ```
 
-> **Schemi visivi:** vedi [`security grafico 00.md`](security%20grafico%2000.md) (TLS 1-way) e [`security grafico 01.md`](security%20grafico%2001.md) (mTLS 2-way).
+> **Schemi visivi:** vedi [`security grafico 00.md`](security%20grafico%2000.md) (TLS 1-way), [`security grafico 01.md`](security%20grafico%2001.md) (mTLS 2-way), [`security grafico 02.md`](security%20grafico%2002.md) (mTLS + ACL) e [`security grafico 03.md`](security%20grafico%2003.md) (giro interno interceptor/context).
 
 > **Nota su `.gitignore`:** la cartella `security/certs/` è esclusa dal versionamento Git perché contiene le chiavi private (`ca-private-key.pem`, `server-private-key.pem`).
 
@@ -72,31 +79,31 @@ Per servizi interni non è necessario rivolgersi a CA esterne: generiamo una **C
    - Definisce i profili ammessi in fase di firma: `server` (`server auth`) e `client` (`client auth`), entrambi con scadenza `8760h` (1 anno) e usi `signing`, `key encipherment`.
 3. **[`config/03-server-richiesta.json`](config/03-server-richiesta.json)** — *Certificato del server*:
    - Mantiene `CN: "127.0.0.1"` e `"hosts": ["localhost", "127.0.0.1"]` (SAN — *Subject Alternative Names*: necessari perché TLS accetti le connessioni locali), con metadati `names` personalizzati (`Ravenna`, `GolangDistributedSystem`, `Log Server`).
-4. **[`config/04-client-richiesta.json`](config/04-client-richiesta.json)** — *Certificato del client*:
-   - Imposta `CN: "client"` (che sarà l'**identità/username** del client usata nel prossimo step per l'autorizzazione ACL), `"hosts": [""]`, e metadati `Ravenna`, `GolangDistributedSystem`, `Log Clients`.
+4. **[`config/04-client-richiesta.json`](config/04-client-richiesta.json)** — *Template generico per i certificati client*:
+   - Fa da **modulo riutilizzabile** per qualsiasi client (chiave RSA 2048, `"hosts": [""]`, metadati `Ravenna`, `GolangDistributedSystem`, `Log Clients`).
+   - Il campo `"CN": "client"` dentro il JSON è solo un **valore di default**: nel [`Makefile`](../Makefile) passiamo `-cn="root"` e `-cn="reader"` a `cfssl gencert`, che **sovrascrive il `CN` al volo** senza dover duplicare un file JSON per ogni utente (se in futuro aggiungi `alice` o `bob`, riusi sempre questo stesso file cambiando solo `-cn="..."`).
 
 ### Flusso di generazione (`make gencert`)
 
 ```text
 config/01-ca-identita.json ────────(cfssl gencert -initca)────► ca.pem + ca-key.pem + ca.csr
                                                                       │
-config/02-ca-regole-firma.json (profile=server) ──────────────────────┼──(cfssl gencert)──► server.pem + server-key.pem + server.csr
+config/02-ca-regole-firma.json (profile=server) ──────────────────────┼──(cfssl gencert)──► server.*
 config/03-server-richiesta.json (localhost, 127.0.0.1) ───────────────┘
                                                                       │
-config/02-ca-regole-firma.json (profile=client) ──────────────────────┼──(cfssl gencert)──► client.pem + client-key.pem + client.csr
-config/04-client-richiesta.json (CN="client") ────────────────────────┘
+config/02-ca-regole-firma.json (profile=client, -cn="root") ──────────┼──(cfssl gencert)──► root-client.*
+config/02-ca-regole-firma.json (profile=client, -cn="reader") ────────┼──(cfssl gencert)──► reader-client.*
+config/04-client-richiesta.json (template riutilizzabile) ────────────┘
                                                                       │
                                                                       ▼  (rinomina chiara + pulizia .csr)
                                                         security/certs/
-                                                          ├── ca-public-cert.pem
-                                                          ├── ca-private-key.pem
-                                                          ├── server-public-cert.pem
-                                                          ├── server-private-key.pem
-                                                          ├── client-public-cert.pem
-                                                          └── client-private-key.pem
+                                                          ├── ca-public-cert.pem / ca-private-key.pem
+                                                          ├── server-public-cert.pem / server-private-key.pem
+                                                          ├── root-client-public-cert.pem / root-client-private-key.pem
+                                                          └── reader-client-public-cert.pem / reader-client-private-key.pem
 ```
 
-`make gencert` rinomina subito i 6 file finali in nomi auto-esplicativi dentro `security/certs/` e rimuove automaticamente i file temporanei `ca.csr`, `server.csr` e `client.csr`.
+`make gencert` rinomina subito gli 8 file finali in nomi auto-esplicativi dentro `security/certs/` e rimuove automaticamente i file `.csr` temporanei.
 
 ---
 
@@ -104,7 +111,7 @@ config/04-client-richiesta.json (CN="client") ───────────�
 
 ### [`cert_paths.go`](cert_paths.go) — Risoluzione dei percorsi dei certificati
 
-Espone le variabili di package `CAPublicCertPath`, `ServerPublicCertPath`, `ServerPrivateKeyPath`, `ClientPublicCertPath` e `ClientPrivateKeyPath` tramite `certPath(filename)`:
+Espone le variabili di package `CAPublicCertPath`, `ServerPublicCertPath`, `ServerPrivateKeyPath`, `RootClientPublicCertPath`, `RootClientPrivateKeyPath`, `ReaderClientPublicCertPath` e `ReaderClientPrivateKeyPath` tramite `certPath(filename)`:
 - Se è impostata la variabile d'ambiente `CERTS_DIR`, usa `filepath.Join(CERTS_DIR, filename)` (utile per test o deploy in container).
 - Altrimenti risolve automaticamente la cartella `security/certs/` usando `runtime.Caller(0)`, così i percorsi funzionano sempre indipendentemente dalla directory da cui avvii `go run` o `go test` (con fallback a `security/certs/`).
 
@@ -141,17 +148,19 @@ go install github.com/cloudflare/cfssl/cmd/cfssljson@latest
 ### Generazione e verifica dei certificati
 
 ```bash
-# Crea security/certs/ e genera i 4 file .pem finali (pulendo i .csr temporanei)
+# Crea security/certs/ e genera gli 8 file .pem finali (pulendo i .csr temporanei)
 make gencert
 
 # Oppure solo creazione della cartella
 make init
 
-# Verifica che server-public-cert.pem e client-public-cert.pem siano firmati da ca-public-cert.pem
+# Verifica che server, root-client e reader-client siano firmati da ca-public-cert.pem
 openssl verify -CAfile security/certs/ca-public-cert.pem security/certs/server-public-cert.pem
-openssl verify -CAfile security/certs/ca-public-cert.pem security/certs/client-public-cert.pem
+openssl verify -CAfile security/certs/ca-public-cert.pem security/certs/root-client-public-cert.pem
+openssl verify -CAfile security/certs/ca-public-cert.pem security/certs/reader-client-public-cert.pem
 
-# Ispeziona dettagli e SAN (Subject Alternative Names) del certificato server o client
+# Ispeziona dettagli e CN dei certificati
 openssl x509 -in security/certs/server-public-cert.pem -text -noout
-openssl x509 -in security/certs/client-public-cert.pem -noout -subject -issuer
+openssl x509 -in security/certs/root-client-public-cert.pem -noout -subject -issuer
+openssl x509 -in security/certs/reader-client-public-cert.pem -noout -subject -issuer
 ```

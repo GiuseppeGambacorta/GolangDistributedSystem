@@ -7,26 +7,31 @@ Prerequisito (una sola volta, genera i certificati in security/certs/):
 
 Nota sicurezza: sia il server sia il client usano di default mTLS (Mutual TLS a 2 vie:
 cifratura + il client verifica il server tramite ca-public-cert.pem + il server verifica
-il passaporto del client client-public-cert.pem con CN="client").
+il passaporto del client scelto con -user: "root" o "reader", default "root").
 
  1. Avvio Server (mTLS attivo):
     go run ./grpc -server
     go run ./grpc -server -addr 127.0.0.1:8080
 
-2) Avvio Client (in un altro terminale; flag -addr opzionale, default 127.0.0.1:8080):
+2) Avvio Client (in un altro terminale; flag -addr opzionale, default 127.0.0.1:8080; -user root | reader):
 
-  - Produce singolo (Unary):
+  - Produce singolo (Unary, default -user root):
     go run ./grpc -op produce -value "hello world"
-    go run ./grpc -addr 127.0.0.1:8080 -op produce -value "ciao"
+    go run ./grpc -user root -op produce -value "ciao"
 
-  - Consume singolo (Unary):
+  - Consume singolo (Unary, funziona sia con root sia con reader):
     go run ./grpc -op consume -offset 0
+    go run ./grpc -user reader -op consume -offset 0
 
   - ProduceStream (Bidirectional Streaming interattivo da tastiera):
     go run ./grpc -op produce-stream
 
   - ConsumeStream (Server-Side Streaming in tempo reale dall'offset indicato):
     go run ./grpc -op consume-stream -offset 0
+    go run ./grpc -user reader -op consume-stream -offset 0
+
+  - Test ACL PermissionDenied (reader può leggere ma NON può scrivere):
+    go run ./grpc -user reader -op produce -value "non autorizzato"
 
   - Test rifiuto TLS a 1 via (client senza certificato proprio: il server mTLS deve rifiutare):
     go run ./grpc -no-client-cert -op produce -value "senza passaporto"
@@ -69,6 +74,7 @@ func main() {
 	offset := flag.Uint64("offset", 0, "record offset for consume / consume-stream")
 	insecureMode := flag.Bool("insecure", false, "connect without TLS")
 	noClientCert := flag.Bool("no-client-cert", false, "connect with 1-way TLS without client certificate (for testing mTLS rejection)")
+	user := flag.String("user", "root", "client identity certificate: root | reader")
 	flag.Parse()
 
 	if *serverMode {
@@ -91,10 +97,22 @@ func main() {
 		}
 		clientCreds = credentials.NewTLS(clientTLSConfig)
 	default:
+		var clientCertPath, clientKeyPath string
+		switch *user {
+		case "root":
+			clientCertPath = security.RootClientPublicCertPath
+			clientKeyPath = security.RootClientPrivateKeyPath
+		case "reader":
+			clientCertPath = security.ReaderClientPublicCertPath
+			clientKeyPath = security.ReaderClientPrivateKeyPath
+		default:
+			log.Fatalf("utente non supportato: %q (usa 'root' o 'reader')", *user)
+		}
+
 		// mTLS (2-way): il client verifica il server con CAPublicCertPath E presenta il proprio passaporto + chiave privata.
 		clientTLSConfig, err := security.BuildTLSConfig(security.TLSOptions{
-			PublicCertPath:   security.ClientPublicCertPath,
-			PrivateKeyPath:   security.ClientPrivateKeyPath,
+			PublicCertPath:   clientCertPath,
+			PrivateKeyPath:   clientKeyPath,
 			CAPublicCertPath: security.CAPublicCertPath,
 		})
 		if err != nil {
@@ -259,7 +277,18 @@ func runServer(address string) {
 	}
 	serverCreds := credentials.NewTLS(serverTLSConfig)
 
-	grpcServer, err := NewGRPCServer(&Config{CommitLog: commitLog}, grpc.Creds(serverCreds))
+	authorizer, err := security.NewAuthorizer(security.ACLModelPath, security.ACLPolicyPath)
+	if err != nil {
+		log.Fatalf("impossibile inizializzare l'authorizer ACL: %v", err)
+	}
+
+	grpcServer, err := NewGRPCServer(
+		&Config{
+			CommitLog:  commitLog,
+			Authorizer: authorizer,
+		},
+		grpc.Creds(serverCreds),
+	)
 	if err != nil {
 		log.Fatalf("impossibile creare il server gRPC: %v", err)
 	}
@@ -270,7 +299,7 @@ func runServer(address string) {
 	}
 	defer listener.Close()
 
-	log.Printf("server gRPC (mTLS) in ascolto su %s", address)
+	log.Printf("server gRPC (mTLS + ACL) in ascolto su %s", address)
 	if err := grpcServer.Serve(listener); err != nil {
 		log.Fatalf("errore server gRPC: %v", err)
 	}

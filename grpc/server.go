@@ -9,6 +9,17 @@ import (
 	api "distribuiti/api/v1"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
+)
+
+const (
+	// Al momento c'è un solo commit log, quindi usiamo "*" (tutto il log).
+	objectWildcard = "*"
+	produceAction  = "produce"
+	consumeAction  = "consume"
 )
 
 type CommitLog interface {
@@ -16,11 +27,20 @@ type CommitLog interface {
 	Read(uint64) (*api.Record, error)
 }
 
+type Authorizer interface {
+	Authorize(subject, object, action string) error
+}
+
 type Config struct {
-	CommitLog CommitLog
+	CommitLog  CommitLog
+	Authorizer Authorizer
 }
 
 func NewGRPCServer(config *Config, opts ...grpc.ServerOption) (*grpc.Server, error) {
+	opts = append(opts,
+		grpc.ChainUnaryInterceptor(unaryAuthInterceptor),
+		grpc.ChainStreamInterceptor(streamAuthInterceptor),
+	)
 	grpcServer := grpc.NewServer(opts...)
 	server, err := createGrpcServer(config)
 	if err != nil {
@@ -42,6 +62,9 @@ type grpcServer struct {
 }
 
 func createGrpcServer(config *Config) (*grpcServer, error) {
+	if config == nil || config.CommitLog == nil || config.Authorizer == nil {
+		return nil, status.Error(codes.InvalidArgument, "commit log and authorizer are required")
+	}
 	return &grpcServer{
 		Config:   config,
 		notifyCh: make(chan struct{}),
@@ -70,6 +93,9 @@ func (server *grpcServer) notifyConsumers() {
 }
 
 func (server *grpcServer) Produce(ctx context.Context, req *api.ProduceRequest) (*api.ProduceResponse, error) {
+	if err := server.Authorizer.Authorize(subject(ctx), objectWildcard, produceAction); err != nil {
+		return nil, err
+	}
 	offset, err := server.CommitLog.Append(req.Record)
 	if err != nil {
 		return nil, err
@@ -80,6 +106,9 @@ func (server *grpcServer) Produce(ctx context.Context, req *api.ProduceRequest) 
 }
 
 func (server *grpcServer) Consume(ctx context.Context, req *api.ConsumeRequest) (*api.ConsumeResponse, error) {
+	if err := server.Authorizer.Authorize(subject(ctx), objectWildcard, consumeAction); err != nil {
+		return nil, err
+	}
 	record, err := server.CommitLog.Read(req.Offset)
 	if err != nil {
 		return nil, err
@@ -135,4 +164,102 @@ func (server *grpcServer) ConsumeStream(req *api.ConsumeRequest, stream grpc.Ser
 		}
 		req.Offset++
 	}
+}
+
+/*
+================================================================================
+GIRO ESATTO DI UNA RICHIESTA (dal client fino a Produce / Consume):
+
+  Chiamata singola (Produce / Consume):
+    Client ──► gRPC chiama unaryAuthInterceptor()
+                 └──► chiama authenticate(ctx)        [legge "root"/"reader" dal cert mTLS e lo mette in newCtx]
+                 └──► chiama handler(newCtx, req)     [cioè entra davvero in Produce(newCtx) o Consume(newCtx)]
+                        └──► chiama subject(ctx)      [rilegge "root"/"reader" da ctx e lo passa a Casbin]
+
+  Chiamata streaming (ProduceStream / ConsumeStream):
+    Client ──► gRPC chiama streamAuthInterceptor()
+                 └──► chiama authenticate(ss.Context()) [legge "root"/"reader" dal cert mTLS e lo mette in newCtx]
+                 └──► avvolge ss in authenticatedServerStream{ctx: newCtx}
+                 └──► chiama handler(srv, wrappedStream) [entra in ProduceStream / ConsumeStream]
+                        └──► stream.Context() restituisce newCtx ──► passa a Produce/Consume ──► subject(ctx)
+================================================================================
+*/
+
+// Chiave privata usata per salvare e rileggere il nome utente ("root"/"reader") dentro context.Context
+// senza rischiare collisioni con altre librerie.
+type subjectContextKey struct{}
+
+// CHI LO USA: streamAuthInterceptor (solo per gli stream).
+// COSA FA: avvolge lo stream originale di gRPC cambiando SOLO il metodo Context() così da restituire
+// il nuovo context con dentro "root"/"reader" (gli altri metodi Send/Recv restano quelli dello stream originale).
+// DOVE VA: viene passato dentro ProduceStream / ConsumeStream al posto dello stream grezzo.
+type authenticatedServerStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s *authenticatedServerStream) Context() context.Context {
+	return s.ctx
+}
+
+// CHI LO CHIAMA: gRPC in automatico (registrato in NewGRPCServer con grpc.ChainUnaryInterceptor)
+// PRIMA di far entrare la richiesta in Produce() o Consume().
+// COSA FA: chiama authenticate(ctx) per leggere "root"/"reader" dal certificato mTLS e infilarlo in newCtx.
+// DOVE VA DOPO: chiama handler(newCtx, req), che esegue finalmente Produce() o Consume() con newCtx.
+func unaryAuthInterceptor(
+	ctx context.Context,
+	req any,
+	_ *grpc.UnaryServerInfo,
+	handler grpc.UnaryHandler,
+) (any, error) {
+	newCtx, err := authenticate(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return handler(newCtx, req)
+}
+
+// CHI LO CHIAMA: gRPC in automatico (registrato in NewGRPCServer con grpc.ChainStreamInterceptor)
+// PRIMA di far entrare la richiesta in ProduceStream() o ConsumeStream().
+// COSA FA: chiama authenticate(ss.Context()) e impacchetta newCtx dentro authenticatedServerStream.
+// DOVE VA DOPO: chiama handler(srv, ...), che esegue ProduceStream() o ConsumeStream() con lo stream arricchito.
+func streamAuthInterceptor(
+	srv any,
+	ss grpc.ServerStream,
+	_ *grpc.StreamServerInfo,
+	handler grpc.StreamHandler,
+) error {
+	newCtx, err := authenticate(ss.Context())
+	if err != nil {
+		return err
+	}
+	return handler(srv, &authenticatedServerStream{ServerStream: ss, ctx: newCtx})
+}
+
+// CHI LO CHIAMA: unaryAuthInterceptor e streamAuthInterceptor.
+// COSA FA: apre le info TLS della connessione, legge il CommonName ("root" o "reader")
+// dal certificato del client e lo salva dentro un nuovo context usando subjectContextKey{}.
+// DOVE VA DOPO: ritorna newCtx all'interceptor, che lo passa a Produce/Consume (o agli stream).
+func authenticate(ctx context.Context) (context.Context, error) {
+	peerInfo, ok := peer.FromContext(ctx)
+	if !ok {
+		return ctx, status.Error(codes.Unknown, "couldn't find peer info")
+	}
+	if peerInfo.AuthInfo == nil {
+		return context.WithValue(ctx, subjectContextKey{}, ""), nil
+	}
+	tlsInfo, ok := peerInfo.AuthInfo.(credentials.TLSInfo)
+	if !ok || len(tlsInfo.State.VerifiedChains) == 0 || len(tlsInfo.State.VerifiedChains[0]) == 0 {
+		return ctx, status.Error(codes.Unauthenticated, "client certificate was not verified")
+	}
+	subject := tlsInfo.State.VerifiedChains[0][0].Subject.CommonName
+	return context.WithValue(ctx, subjectContextKey{}, subject), nil
+}
+
+// CHI LO CHIAMA: Produce() e Consume() (le prime righe di entrambi i metodi).
+// COSA FA: tira fuori dal context la stringa ("root" o "reader") salvata prima da authenticate().
+// DOVE VA DOPO: la stringa viene passata a server.Authorizer.Authorize(subject(ctx), "*", "produce"/"consume").
+func subject(ctx context.Context) string {
+	value, _ := ctx.Value(subjectContextKey{}).(string)
+	return value
 }
