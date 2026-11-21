@@ -1,8 +1,15 @@
 /*
 Esempi di lancio (dalla root del progetto; se eseguito dentro grpc/, usa `go run .` invece di `go run ./grpc`,
-non usare `go run main.go` perché `server.go` fa parte dello stesso package `main`):
+non usare `go run main.go` perché `server.go` fa parte dello stesso package `main`).
 
- 1. Avvio Server:
+Prerequisito (una sola volta, genera i certificati in security/certs/):
+   make gencert
+
+Nota sicurezza: sia il server sia il client usano di default mTLS (Mutual TLS a 2 vie:
+cifratura + il client verifica il server tramite ca-public-cert.pem + il server verifica
+il passaporto del client client-public-cert.pem con CN="client").
+
+ 1. Avvio Server (mTLS attivo):
     go run ./grpc -server
     go run ./grpc -server -addr 127.0.0.1:8080
 
@@ -20,6 +27,12 @@ non usare `go run main.go` perché `server.go` fa parte dello stesso package `ma
 
   - ConsumeStream (Server-Side Streaming in tempo reale dall'offset indicato):
     go run ./grpc -op consume-stream -offset 0
+
+  - Test rifiuto TLS a 1 via (client senza certificato proprio: il server mTLS deve rifiutare):
+    go run ./grpc -no-client-cert -op produce -value "senza passaporto"
+
+  - Test rifiuto connessione in chiaro (il server mTLS deve rifiutare questa chiamata):
+    go run ./grpc -insecure -op produce -value "test in chiaro"
 */
 package main
 
@@ -39,9 +52,11 @@ import (
 
 	api "distribuiti/api/v1"
 	commitlog "distribuiti/log"
+	"distribuiti/security"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
@@ -52,6 +67,8 @@ func main() {
 	op := flag.String("op", "produce", "operation: produce | consume | produce-stream | consume-stream")
 	value := flag.String("value", "hello world", "record value for produce")
 	offset := flag.Uint64("offset", 0, "record offset for consume / consume-stream")
+	insecureMode := flag.Bool("insecure", false, "connect without TLS")
+	noClientCert := flag.Bool("no-client-cert", false, "connect with 1-way TLS without client certificate (for testing mTLS rejection)")
 	flag.Parse()
 
 	if *serverMode {
@@ -59,8 +76,34 @@ func main() {
 		return
 	}
 
-	// Connessione al server gRPC senza TLS (moderna, al posto di grpc.Dial deprecato)
-	conn, err := grpc.NewClient(*address, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	var clientCreds credentials.TransportCredentials
+	switch {
+	case *insecureMode:
+		// Solo per fare la prova del 9: il server mTLS deve rifiutare questa connessione!
+		clientCreds = insecure.NewCredentials()
+	case *noClientCert:
+		// TLS a 1 via (senza passaporto del client): il server mTLS deve rifiutarlo perché richiede il certificato client!
+		clientTLSConfig, err := security.BuildTLSConfig(security.TLSOptions{
+			CAPublicCertPath: security.CAPublicCertPath,
+		})
+		if err != nil {
+			log.Fatalf("impossibile configurare TLS 1-way lato client: %v", err)
+		}
+		clientCreds = credentials.NewTLS(clientTLSConfig)
+	default:
+		// mTLS (2-way): il client verifica il server con CAPublicCertPath E presenta il proprio passaporto + chiave privata.
+		clientTLSConfig, err := security.BuildTLSConfig(security.TLSOptions{
+			PublicCertPath:   security.ClientPublicCertPath,
+			PrivateKeyPath:   security.ClientPrivateKeyPath,
+			CAPublicCertPath: security.CAPublicCertPath,
+		})
+		if err != nil {
+			log.Fatalf("impossibile configurare mTLS lato client: %v", err)
+		}
+		clientCreds = credentials.NewTLS(clientTLSConfig)
+	}
+
+	conn, err := grpc.NewClient(*address, grpc.WithTransportCredentials(clientCreds))
 	if err != nil {
 		log.Fatalf("impossibile creare il client gRPC: %v", err)
 	}
@@ -203,7 +246,20 @@ func runServer(address string) {
 	}
 	defer commitLog.Close()
 
-	grpcServer, err := NewGRPCServer(&Config{CommitLog: commitLog})
+	// Il server carica il proprio passaporto + chiave privata E il timbro della CA con IsServer: true:
+	// in questo modo attiva tls.RequireAndVerifyClientCert (mTLS a 2 vie) e verifica anche i client.
+	serverTLSConfig, err := security.BuildTLSConfig(security.TLSOptions{
+		PublicCertPath:   security.ServerPublicCertPath,
+		PrivateKeyPath:   security.ServerPrivateKeyPath,
+		CAPublicCertPath: security.CAPublicCertPath,
+		IsServer:         true,
+	})
+	if err != nil {
+		log.Fatalf("impossibile configurare mTLS lato server: %v", err)
+	}
+	serverCreds := credentials.NewTLS(serverTLSConfig)
+
+	grpcServer, err := NewGRPCServer(&Config{CommitLog: commitLog}, grpc.Creds(serverCreds))
 	if err != nil {
 		log.Fatalf("impossibile creare il server gRPC: %v", err)
 	}
@@ -214,7 +270,7 @@ func runServer(address string) {
 	}
 	defer listener.Close()
 
-	log.Printf("server gRPC in ascolto su %s", address)
+	log.Printf("server gRPC (mTLS) in ascolto su %s", address)
 	if err := grpcServer.Serve(listener); err != nil {
 		log.Fatalf("errore server gRPC: %v", err)
 	}

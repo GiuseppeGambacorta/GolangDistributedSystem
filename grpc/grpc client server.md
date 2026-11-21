@@ -22,25 +22,30 @@ main() [-server=true]
   │
   ▼
 runServer(address)
-  ├──► os.MkdirAll("data", 0755)                  # Crea/apre la cartella dati locale
-  ├──► commitlog.NewLog("data", Config{})         # Apre i segmenti su disco (defer Close)
-  ├──► NewGRPCServer(&Config{CommitLog: ...})     # Crea grpc.Server + grpcServer con notifyCh
-  │      └──► api.RegisterLogServer(...)          # Registra l'implementazione su gRPC
-  ├──► net.Listen("tcp", address)                 # Apre il socket TCP (default 127.0.0.1:8080)
-  └──► grpcServer.Serve(listener)                 # Loop di accettazione richieste gRPC
+  ├──► os.MkdirAll("data", 0755)                         # Crea/apre la cartella dati locale
+  ├──► commitlog.NewLog("data", Config{})                # Apre i segmenti su disco (defer Close)
+  ├──► security.BuildTLSConfig(ServerPublic/PrivateKey + CA, IsServer: true) # mTLS
+  │      └──► credentials.NewTLS(...)                    # Adattatore credenziali gRPC
+  ├──► NewGRPCServer(&Config{...}, grpc.Creds(...))      # Crea grpc.Server mTLS + grpcServer con notifyCh
+  │      └──► api.RegisterLogServer(...)                 # Registra l'implementazione su gRPC
+  ├──► net.Listen("tcp", address)                        # Apre il socket TCP (default 127.0.0.1:8080)
+  └──► grpcServer.Serve(listener)                        # Loop di accettazione richieste gRPC
 ```
 
 Dettagli chiave in [`server.go`](server.go):
 - **Disaccoppiamento**: `grpcServer` non dipende direttamente da `*log.Log`, ma dall'interfaccia `CommitLog` (`Append` e `Read`).
 - **Verifica a compile-time**: `var _ api.LogServer = (*grpcServer)(nil)` garantisce che `grpcServer` implementi tutti i metodi generati da [`api/v1/log.proto`](../api/v1/log.proto).
-- **Sicurezza attuale**: la connessione è attualmente in chiaro (senza TLS), predisposta per i prossimi step (mTLS e ACL).
+- **Sicurezza attuale**: è attivo **mTLS a 2 vie (autenticazione reciproca client ↔ server + cifratura)** tramite [`../security/security.md`](../security/security.md) (`IsServer: true` → `RequireAndVerifyClientCert`). L'autorizzazione ACL (Casbin) verrà aggiunta nel prossimo step.
 
 ### Avvio del Client (`-server=false`, default)
 
 ```text
 main() [-server=false]
   │
-  ├──► grpc.NewClient(address, insecure)          # Crea il canale gRPC (senza Dial bloccante)
+  ├──► -insecure (test):         insecure.NewCredentials()
+  │    -no-client-cert (test):   security.BuildTLSConfig(CAPublicCertPath)  [TLS 1-way senza cert client]
+  │    default (mTLS):           security.BuildTLSConfig(ClientPublic/PrivateKey + CAPublicCertPath)
+  ├──► grpc.NewClient(address, grpc.WithTransportCredentials(clientCreds))
   ├──► api.NewLogClient(conn)                     # Stub client generato da protoc-gen-go-grpc
   ├──► signal.NotifyContext(..., SIGINT, SIGTERM) # Contesto cancellabile con Ctrl+C
   └──► switch *op
@@ -144,17 +149,24 @@ Consente a uno o più consumer di restare in ascolto in tempo reale sui nuovi re
 | `-op` | `produce` | Operazione client: `produce`, `consume`, `produce-stream`, `consume-stream`. |
 | `-value` | `hello world` | Valore testuale del record per `-op produce`. |
 | `-offset` | `0` | Offset di partenza per `-op consume` o `-op consume-stream`. |
+| `-insecure` | `false` | Disattiva TLS sul client per verificare che il server rifiuti connessioni in chiaro. |
+| `-no-client-cert` | `false` | Usa TLS a 1 via senza passaporto client per verificare che il server mTLS rifiuti client anonimi. |
 
 > **Nota sul comando `go run`:** esegui sempre `go run ./grpc ...` dalla root del repository (oppure `go run . ...` da dentro `grpc/`). Non usare `go run main.go`, perché `server.go` appartiene allo stesso `package main`.
 
 ### Esempio pratico su 3 terminali
 
-**Terminale 1 — Avvia il server:**
+**Prerequisito (una sola volta, genera i certificati in `security/certs/`):**
+```bash
+make gencert
+```
+
+**Terminale 1 — Avvia il server (con TLS attivo):**
 ```bash
 go run ./grpc -server
 ```
 
-**Terminale 2 — Apri un consumer in streaming dall'offset 0:**
+**Terminale 2 — Apri un consumer in streaming dall'offset 0 (con TLS attivo):**
 ```bash
 go run ./grpc -op consume-stream -offset 0
 ```
@@ -164,6 +176,18 @@ go run ./grpc -op consume-stream -offset 0
 # Invio singolo
 go run ./grpc -op produce -value "primo messaggio"
 
+# Lettura singola
+go run ./grpc -op consume -offset 0
+
 # Oppure invio interattivo continuo ('exit' o Ctrl+D per terminare)
 go run ./grpc -op produce-stream
+```
+
+**Prova del 9 — Verifica che il server mTLS rifiuti sia il chiaro sia client senza certificato:**
+```bash
+# 1. Client senza certificato proprio (TLS 1-way) -> rifiutato dal server mTLS
+go run ./grpc -no-client-cert -op produce -value "senza passaporto"
+
+# 2. Client senza TLS -> rifiutato dal server mTLS
+go run ./grpc -insecure -op produce -value "in chiaro"
 ```

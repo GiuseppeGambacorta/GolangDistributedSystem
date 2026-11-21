@@ -1,0 +1,16 @@
+{
+  "CN": "GolangDistributedSystem CA",
+  "key": {
+    "algo": "rsa",
+    "size": 2048
+  },
+  "names": [
+    {
+      "C": "IT",
+      "ST": "Emilia-Romagna",
+      "L": "Ravenna",
+      "O": "GolangDistributedSystem",
+      "OU": "Certificate Authority"
+    }
+  ]
+}

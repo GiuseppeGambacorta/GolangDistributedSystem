@@ -20,9 +20,9 @@ type Config struct {
 	CommitLog CommitLog
 }
 
-func NewGRPCServer(config *Config) (*grpc.Server, error) {
-	grpcServer := grpc.NewServer()
-	server, err := newgrpcServer(config)
+func NewGRPCServer(config *Config, opts ...grpc.ServerOption) (*grpc.Server, error) {
+	grpcServer := grpc.NewServer(opts...)
+	server, err := createGrpcServer(config)
 	if err != nil {
 		return nil, err
 	}
@@ -41,7 +41,7 @@ type grpcServer struct {
 	notifyCh chan struct{}
 }
 
-func newgrpcServer(config *Config) (*grpcServer, error) {
+func createGrpcServer(config *Config) (*grpcServer, error) {
 	return &grpcServer{
 		Config:   config,
 		notifyCh: make(chan struct{}),
