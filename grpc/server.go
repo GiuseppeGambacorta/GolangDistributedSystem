@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net"
 	"os"
 	"sync"
+	"time"
 
 	api "distribuiti/api/v1"
 	commitlog "distribuiti/log"
+	"distribuiti/observability"
 	"distribuiti/security"
 
 	"google.golang.org/grpc"
@@ -40,12 +43,20 @@ type Authorizer interface {
 type Config struct {
 	CommitLog  CommitLog
 	Authorizer Authorizer
+	Logger     *slog.Logger // opzionale: se valorizzato, scrive i log strutturati JSON di ogni RPC
 }
 
 func NewGRPCServer(config *Config, opts ...grpc.ServerOption) (*grpc.Server, error) {
+	unaryInterceptors := []grpc.UnaryServerInterceptor{unaryAuthInterceptor}
+	streamInterceptors := []grpc.StreamServerInterceptor{streamAuthInterceptor}
+	if config != nil && config.Logger != nil {
+		unaryInterceptors = append(unaryInterceptors, unaryLogInterceptor(config.Logger))
+		streamInterceptors = append(streamInterceptors, streamLogInterceptor(config.Logger))
+	}
+
 	opts = append(opts,
-		grpc.ChainUnaryInterceptor(unaryAuthInterceptor),
-		grpc.ChainStreamInterceptor(streamAuthInterceptor),
+		grpc.ChainUnaryInterceptor(unaryInterceptors...),
+		grpc.ChainStreamInterceptor(streamInterceptors...),
 	)
 	grpcServer := grpc.NewServer(opts...)
 	server, err := createGrpcServer(config)
@@ -56,7 +67,7 @@ func NewGRPCServer(config *Config, opts ...grpc.ServerOption) (*grpc.Server, err
 	return grpcServer, nil
 }
 
-// RunServer avvia il server gRPC completo (CommitLog su data/ + mTLS + Casbin ACL)
+// RunServer avvia il server gRPC completo (CommitLog su data/ + mTLS + Casbin ACL + Observability)
 // e si arresta in modo pulito quando ctx viene cancellato (es. Ctrl+C).
 func RunServer(ctx context.Context, address string) error {
 	dataDir := "data"
@@ -69,6 +80,21 @@ func RunServer(ctx context.Context, address string) error {
 		return fmt.Errorf("impossibile aprire il commit log: %w", err)
 	}
 	defer commitLog.Close()
+
+	// Avvia i 3 pilastri dell'osservabilità (server.log, metrics.log, traces.log in observability/output/).
+	telemetry, err := observability.Setup(observability.Options{
+		ServiceName: "proglog-server",
+	})
+	if err != nil {
+		return fmt.Errorf("impossibile inizializzare observability: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := telemetry.Shutdown(shutdownCtx); err != nil {
+			log.Printf("errore chiusura observability: %v", err)
+		}
+	}()
 
 	// Il server carica il proprio passaporto + chiave privata E il timbro della CA con IsServer: true:
 	// attiva tls.RequireAndVerifyClientCert (mTLS a 2 vie) per verificare anche i client.
@@ -92,8 +118,10 @@ func RunServer(ctx context.Context, address string) error {
 		&Config{
 			CommitLog:  commitLog,
 			Authorizer: authorizer,
+			Logger:     telemetry.Logger,
 		},
 		grpc.Creds(serverCreds),
+		grpc.StatsHandler(telemetry.GRPCStatsHandler()),
 	)
 	if err != nil {
 		return fmt.Errorf("impossibile creare il server gRPC: %w", err)
@@ -111,7 +139,9 @@ func RunServer(ctx context.Context, address string) error {
 		grpcServer.GracefulStop()
 	}()
 
-	log.Printf("server gRPC (mTLS + ACL) in ascolto su %s (premi Ctrl+C per fermare)", address)
+	log.Printf("server gRPC (mTLS + ACL + Observability) in ascolto su %s (premi Ctrl+C per fermare)", address)
+	log.Printf("observability -> logs: %s | metrics: %s | traces: %s",
+		telemetry.LogsFilePath, telemetry.MetricsFilePath, telemetry.TracesFilePath)
 	if err := grpcServer.Serve(listener); err != nil {
 		return fmt.Errorf("errore server gRPC: %w", err)
 	}
@@ -330,4 +360,56 @@ func authenticate(ctx context.Context) (context.Context, error) {
 func subject(ctx context.Context) string {
 	value, _ := ctx.Value(subjectContextKey{}).(string)
 	return value
+}
+
+// unaryLogInterceptor misura la durata di ogni RPC Unary e scrive una riga JSON in server.log.
+// Gira DOPO unaryAuthInterceptor, così subject(ctx) contiene già "root" o "reader".
+func unaryLogInterceptor(logger *slog.Logger) grpc.UnaryServerInterceptor {
+	return func(
+		ctx context.Context,
+		req any,
+		info *grpc.UnaryServerInfo,
+		handler grpc.UnaryHandler,
+	) (any, error) {
+		start := time.Now()
+		resp, err := handler(ctx, req)
+		logRPCCall(ctx, logger, "finished unary call", info.FullMethod, time.Since(start), err)
+		return resp, err
+	}
+}
+
+// streamLogInterceptor misura la durata di ogni RPC Streaming e scrive una riga JSON in server.log.
+func streamLogInterceptor(logger *slog.Logger) grpc.StreamServerInterceptor {
+	return func(
+		srv any,
+		ss grpc.ServerStream,
+		info *grpc.StreamServerInfo,
+		handler grpc.StreamHandler,
+	) error {
+		start := time.Now()
+		err := handler(srv, ss)
+		logRPCCall(ss.Context(), logger, "finished streaming call", info.FullMethod, time.Since(start), err)
+		return err
+	}
+}
+
+func logRPCCall(ctx context.Context, logger *slog.Logger, msg, method string, duration time.Duration, err error) {
+	level := slog.LevelInfo
+	if err != nil {
+		level = slog.LevelWarn
+	}
+	logger.Log(ctx, level, msg,
+		"grpc.method", method,
+		"grpc.code", status.Code(err).String(),
+		"grpc.time_ns", duration.Nanoseconds(),
+		"subject", subject(ctx),
+		"peer.address", peerAddress(ctx),
+	)
+}
+
+func peerAddress(ctx context.Context) string {
+	if peerInfo, ok := peer.FromContext(ctx); ok && peerInfo.Addr != nil {
+		return peerInfo.Addr.String()
+	}
+	return ""
 }

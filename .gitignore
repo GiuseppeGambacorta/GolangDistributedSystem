@@ -1,3 +1,13 @@
+# Commit log runtime data
+data/
 *.index
 *.store
+
+# Generated TLS/mTLS certificates & private keys
 security/certs/
+
+# Local observability runtime logs (server.log, metrics.log, traces.log)
+observability/output/
+
+# macOS metadata
+.DS_Store

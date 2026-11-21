@@ -47,8 +47,34 @@ Tutto parte da [`api/v1/log.proto`](../api/v1/log.proto). Eseguendo `make compil
   - lo **stub client** (`api.NewLogClient(conn)`), che espone i metodi pronti da chiamare;
   - l'**interfaccia server** (`api.LogServer`), che implementiamo in [`server.go`](server.go) e registriamo con `api.RegisterLogServer(...)`.
 
-### B. HTTP/2 e Multiplexing
-Su una **singola connessione TCP** (`grpc.NewClient(...)`), gRPC può far viaggiare **decine di chiamate e stream contemporaneamente** senza aprire una nuova connessione ogni volta e senza che una richiesta lenta blocchi le altre.
+### B. HTTP/2, Porte Effimere e Multiplexing
+
+Ci sono **due meccanismi distinti** (uno di TCP, uno di HTTP/2) che lavorano insieme quando i client parlano col server su `127.0.0.1:8080`:
+
+1. **Più client sulla stessa porta del server (`8080`) — grazie a TCP**:
+   Il server ascolta su **una sola porta** (`8080`), ma può gestire migliaia di client contemporaneamente. Il sistema operativo assegna a ogni client una **porta effimera** diversa (es. `51975`, `52010`, `52044`), e TCP distingue ogni connessione tramite la quaterna `(IP client, porta client, IP server, porta server)`:
+   ```text
+   Terminale Client A  (127.0.0.1:51975) ──┐
+   Terminale Client B  (127.0.0.1:52010) ──┼──►  SERVER gRPC (127.0.0.1:8080)
+   Terminale Client C  (127.0.0.1:52044) ──┘
+   ```
+
+2. **Tante RPC dello stesso client su UNA sola connessione — grazie a HTTP/2 Multiplexing**:
+   Quando un client apre una connessione con `grpc.NewClient(...)`, viene fatto **un solo handshake TCP + mTLS** su quella porta effimera (es. `127.0.0.1:51975`). Da quel momento, **HTTP/2** divide la singola connessione TCP in tanti **stream binari indipendenti** (identificati da uno Stream ID):
+   ```text
+   Client A (127.0.0.1:51975) ═══ 1 sola connessione TCP + mTLS ═══► Server (127.0.0.1:8080)
+                                    ├── Stream #1: Produce("ciao")
+                                    ├── Stream #3: ProduceStream(...)
+                                    ├── Stream #5: Produce("test")
+                                    └── Stream #7: Consume(0)
+   ```
+   - **Ecco perché nel tuo `server.log` tutte e 4 le chiamate avevano lo stesso `"peer.address": "127.0.0.1:51975"`**: nella CLI (`cli/cli.go`) la connessione resta aperta per tutto il menu e HTTP/2 ci fa passare dentro tutte le chiamate senza riaprire socket né rifare mTLS ogni volta!
+   - **Confronto diretto con HTTP/1.1**:
+     - **HTTP/1.1 ("coda al supermercato" — 1 richiesta alla volta)**: anche con `Keep-Alive`, su una singola connessione TCP una richiesta deve aspettare la risposta prima di inviare la successiva (*Head-of-Line blocking*); per lavorare in parallelo il client deve aprire più connessioni TCP (es. 6 porte effimere + 6 handshake TLS).
+       ```text
+       [Richiesta 1] ──► (aspetta...) ──► [Risposta 1] ──► [Richiesta 2] ──► [Risposta 2]
+       ```
+     - **HTTP/2 / gRPC ("autostrada a più corsie" — tutto in parallelo su 1 connessione)**: i pacchetti sono divisi in frame binari etichettati (`Stream #1`, `Stream #3`, `Stream #5`...), quindi RPC singole e stream bidirezionali viaggiano insieme senza bloccarsi a vicenda.
 
 ### C. `context.Context` distribuito (Timeout e Cancellazione)
 In gRPC ogni chiamata riceve un `context.Context` che **viaggia dal client al server**:

@@ -18,7 +18,10 @@ Panoramica del progetto (Commit Log distribuito in Go con Protocol Buffers, gRPC
 | 8 | [`security/security grafico 01.md`](security/security%20grafico%2001.md) | Step 4 — `security/` | Schema visivo 01: creazione certificato client e handshake **mTLS a 2 vie** (anche il server autentica il client). |
 | 9 | [`security/security grafico 02.md`](security/security%20grafico%2002.md) | Step 4 — `security/` | Schema visivo 02: flusso completo **mTLS + Interceptor gRPC + Casbin ACL** (`root` vs `reader`). |
 | 10 | [`security/security grafico 03.md`](security/security%20grafico%2003.md) | Step 4 — `security/` | Schema visivo 03: giro interno in `grpc/server.go` (`unaryAuthInterceptor` / `streamAuthInterceptor` → `authenticate` → `subject`). |
-| 11 | [`appuntiGolang.md`](appuntiGolang.md) | Appunti trasversali | Approfondimenti Go usati nel progetto: Array vs Slice, operatore `[:]` (Zero-Allocation pattern) e controllo interfacce a compile-time. |
+| 11 | [`observability/00_observability.md`](observability/00_observability.md) | Step 5 — `observability/` | Panoramica dei 3 pilastri dell'osservabilità, dei 4 Golden Signals e della struttura di `telemetry.go`. |
+| 12 | [`observability/01_observability.md`](observability/01_observability.md) | Step 5 — `observability/` | Spiegazione da zero (analogia pizzeria), anatomia di `Setup()` e `otel`, esempi JSON dei 3 file e postilla Prometheus/Jaeger. |
+| 13 | [`observability/02_observability.md`](observability/02_observability.md) | Step 5 — `observability/` | Lettura campo per campo dei tuoi log reali generati in `server.log`, `traces.log` e `metrics.log` (istogrammi, bucket, exemplars). |
+| 14 | [`appuntiGolang.md`](appuntiGolang.md) | Appunti trasversali | Approfondimenti Go usati nel progetto: Array vs Slice, operatore `[:]` (Zero-Allocation pattern) e controllo interfacce a compile-time. |
 
 ---
 
@@ -27,7 +30,7 @@ Panoramica del progetto (Commit Log distribuito in Go con Protocol Buffers, gRPC
 L'ordine logico seguito nello sviluppo (confermato anche dalla cronologia dei commit) è:
 
 ```text
-1. log/ (Storage & Commit Log)  ──►  2. api/v1/ (Protobuf & Errori)  ──►  3. grpc/ (Server & Client)  ──►  4. security/ (CA, Certificati & TLS)
+1. log/ (Storage & Commit Log)  ──►  2. api/v1/ (Protobuf & Errori)  ──►  3. grpc/ + cli/ (Server, Client & TUI)  ──►  4. security/ (CA, mTLS & Casbin ACL)  ──►  5. observability/ (Logs, Metrics & Traces)
 ```
 
 *(Nota tecnica: nel codice finale `log/segment.go` e `log/log.go` importano `api/v1` per serializzare `api.Record` e restituire `api.ErrOffsetOutOfRange`; concettualmente si parte però dalla progettazione del log su disco.)*
@@ -75,7 +78,7 @@ Esposizione del Commit Log via rete gRPC e interfaccia interattiva nel terminale
 
 ---
 
-### Step 4 — Sicurezza: CA, Certificati e Configurazione TLS (`security/`)
+### Step 4 — Sicurezza: CA, Certificati, mTLS e Casbin ACL (`security/`)
 
 Creazione dell'infrastruttura PKI locale e della configurazione TLS in una cartella dedicata alla radice del progetto:
 
@@ -85,9 +88,21 @@ Creazione dell'infrastruttura PKI locale e della configurazione TLS in una carte
 - **`security/tls.go`**: definisce `TLSOptions` e `BuildTLSConfig()` per costruire `*tls.Config` in modalità client o server (TLS e mTLS).
 - **`security/authorizer.go`**: wrapper Casbin v2 (`NewAuthorizer`, `Authorize`) che applica i permessi ACL (`root`: `produce` + `consume`; `reader`: solo `consume`).
 
-*(Stato attuale: **TLS + mTLS + Casbin ACL** completamente integrati in `grpc/server.go` e `grpc/main.go`.)*
+*(Stato attuale: **TLS + mTLS + Casbin ACL** completamente integrati in `grpc/server.go`, `grpc/client.go` e `cli/cli.go`.)*
 
 - **Documentazione interna:** [`security/security.md`](security/security.md), [`security/security grafico 00.md`](security/security%20grafico%2000.md), [`security/security grafico 01.md`](security/security%20grafico%2001.md), [`security/security grafico 02.md`](security/security%20grafico%2002.md), [`security/security grafico 03.md`](security/security%20grafico%2003.md).
+
+---
+
+### Step 5 — Osservabilità: Log Strutturati, Metriche e Tracce (`observability/`)
+
+Integrazione dei 3 pilastri dell'osservabilità con stack moderno Go 1.26 (`log/slog` + OpenTelemetry `otel`/`otelgrpc`):
+
+- **`observability/telemetry.go`**: configura il logger JSON (`server.log`), il `TracerProvider` (`traces.log`), il `MeterProvider` (`metrics.log`) e fornisce `GRPCStatsHandler()` (`otelgrpc.NewServerHandler()`).
+- **`grpc/server.go`**: aggancia `unaryLogInterceptor` / `streamLogInterceptor` (dopo l'autenticazione mTLS, così loggano anche `subject`) e `grpc.StatsHandler(telemetry.GRPCStatsHandler())`, con flush/chiusura pulita allo spegnimento del server (`Ctrl+C`).
+- **`observability/output/`**: directory dei 3 file generati a runtime (`server.log`, `metrics.log`, `traces.log`), esclusa dal controllo versione in `.gitignore`.
+
+- **Documentazione interna:** [`observability/00_observability.md`](observability/00_observability.md), [`observability/01_observability.md`](observability/01_observability.md), [`observability/02_observability.md`](observability/02_observability.md).
 
 ---
 
@@ -100,7 +115,7 @@ Creazione dell'infrastruttura PKI locale e della configurazione TLS in una carte
 ## Comandi Rapidi
 
 ```bash
-# Crea security/certs/ e genera CA + certificati server con CFSSL
+# Crea security/certs/ e genera CA + certificati server e client (root, reader) con CFSSL
 make init
 make gencert
 
@@ -129,8 +144,10 @@ Elenco aggiornato delle dipendenze presenti in [`go.mod`](go.mod), dei principal
 | `google.golang.org/genproto/googleapis/rpc` | `v0.0.0-20261110000943-09e21b237f2c` | `api/v1/error.go` | Tipi standard per arricchire gli errori gRPC con metadati strutturati (`errdetails.LocalizedMessage`). |
 | `github.com/casbin/casbin/v2` | `v2.135.0` | `security/authorizer.go` | Motore di autorizzazione ACL (controllo accessi): valuta se un `subject` (`root`, `reader`) può eseguire un'azione (`produce`, `consume`) secondo `05-acl-modello.conf` e `06-acl-permessi.csv`. |
 | `github.com/charmbracelet/huh` | `v1.0.0` | `cli/cli.go` | Menu interattivi e form nel terminale (costruita sopra `bubbletea`) per lanciare server e client da `go run .` senza flag. |
+| `go.opentelemetry.io/otel` (+ `sdk`, `stdouttrace`, `stdoutmetric`) | `v1.47.0` | `observability/telemetry.go` | Standard moderno OpenTelemetry per raccogliere ed esportare **Traces** e **Metrics** su file JSON locali (`traces.log`, `metrics.log`). |
+| `go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc` | `v0.72.0` | `observability/telemetry.go` | Integrazione OpenTelemetry per gRPC (`otelgrpc.NewServerHandler()`): cattura automaticamente latenze, byte e span di ogni RPC. |
 
-> **Dipendenze indirette (`// indirect` in `go.mod`):** `golang.org/x/net`, `golang.org/x/sys`, `golang.org/x/text` (usate internamente da `google.golang.org/grpc` per HTTP/2, syscall e testo) e `github.com/casbin/govaluate`, `github.com/bmatcuk/doublestar/v4`, `github.com/google/uuid` (usate internamente da `casbin/v2` per valutare i matcher e i pattern wildcard).
+> **Dipendenze indirette (`// indirect` in `go.mod`):** `golang.org/x/net`, `golang.org/x/sys`, `golang.org/x/text` (usate da `google.golang.org/grpc`), `github.com/casbin/govaluate`, `github.com/bmatcuk/doublestar/v4`, `github.com/google/uuid` (usate da `casbin/v2`) e `github.com/charmbracelet/bubbletea`, `bubbles`, `lipgloss` (usate da `charmbracelet/huh` per il rendering TUI nel terminale).
 
 ### Principali package della Standard Library Go
 
